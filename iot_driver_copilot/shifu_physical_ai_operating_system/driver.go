@@ -1,217 +1,208 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 )
 
-// TelemetryData aggregates telemetry, sensor, video, and AI inference data.
+// TelemetryData represents the real-time telemetry, sensor, video, and AI data structure.
 type TelemetryData struct {
-	Timestamp      time.Time              `json:"timestamp"`
-	Telemetry      map[string]interface{} `json:"telemetry"`
-	Sensor         map[string]interface{} `json:"sensor"`
-	AIInference    map[string]interface{} `json:"ai_inference"`
-	VideoStreamURL string                 `json:"video_stream_url,omitempty"`
+	Timestamp        time.Time              `json:"timestamp"`
+	SensorData       map[string]interface{} `json:"sensor_data,omitempty"`
+	VideoStreamMJPEG string                 `json:"video_stream_mjpeg,omitempty"`
+	AIResults        map[string]interface{} `json:"ai_results,omitempty"`
+	CustomData       map[string]interface{} `json:"custom_data,omitempty"`
 }
 
-// OTAUpdateRequest represents OTA update parameters.
+// OTAUpdateRequest represents the expected OTA update POST payload.
 type OTAUpdateRequest struct {
-	Version     string `json:"version"`
-	DownloadURL string `json:"download_url"`
-	Checksum    string `json:"checksum,omitempty"`
+	Version     string                 `json:"version"`
+	URL         string                 `json:"url"`
+	Checksum    string                 `json:"checksum"`
+	ExtraParams map[string]interface{} `json:"extra_params,omitempty"`
 }
 
-// ControlCommand represents remote control command parameters.
-type ControlCommand struct {
-	Command string                 `json:"command"`
-	Params  map[string]interface{} `json:"params"`
+// ControlCommandRequest represents the expected control POST payload.
+type ControlCommandRequest struct {
+	Command     string                 `json:"command"`
+	Parameters  map[string]interface{} `json:"parameters"`
 }
 
-// DeviceClient simulates interaction with the physical AI OS.
-type DeviceClient struct {
-	Host string
-	Port int
-	APIToken string
-}
+var (
+	deviceIP         = os.Getenv("DEVICE_IP")
+	serverHost       = os.Getenv("SERVER_HOST")
+	serverPort       = os.Getenv("SERVER_PORT")
+	telemetryTimeout = getenvInt("TELEMETRY_TIMEOUT", 5) // seconds
+	videoMJPEGPort   = os.Getenv("VIDEO_MJPEG_PORT")
+)
 
-func NewDeviceClientFromEnv() *DeviceClient {
-	host := os.Getenv("DEVICE_HOST")
-	portStr := os.Getenv("DEVICE_PORT")
-	port, _ := strconv.Atoi(portStr)
-	apiToken := os.Getenv("DEVICE_API_TOKEN")
-	return &DeviceClient{
-		Host: host,
-		Port: port,
-		APIToken: apiToken,
+func getenvInt(env string, def int) int {
+	if v := os.Getenv(env); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
 	}
-}
-
-// FetchTelemetry connects to the device and fetches telemetry/sensor/AI data.
-func (dc *DeviceClient) FetchTelemetry(ctx context.Context) (*TelemetryData, error) {
-	url := "http://" + dc.Host + ":" + strconv.Itoa(dc.Port) + "/api/telemetry"
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if dc.APIToken != "" {
-		req.Header.Set("Authorization", "Bearer " + dc.APIToken)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var data TelemetryData
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
-	}
-	return &data, nil
-}
-
-// ProxyVideoStream connects to the device's video endpoint and proxies to HTTP.
-func (dc *DeviceClient) ProxyVideoStream(w http.ResponseWriter, r *http.Request) {
-	videoPath := os.Getenv("DEVICE_VIDEO_PATH")
-	if videoPath == "" {
-		videoPath = "/api/video/stream"
-	}
-	url := "http://" + dc.Host + ":" + strconv.Itoa(dc.Port) + videoPath
-	req, _ := http.NewRequestWithContext(r.Context(), "GET", url, nil)
-	if dc.APIToken != "" {
-		req.Header.Set("Authorization", "Bearer " + dc.APIToken)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		http.Error(w, "Unable to connect to video stream", 502)
-		return
-	}
-	defer resp.Body.Close()
-	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
-}
-
-// OTAUpdate proxies OTA request to device.
-func (dc *DeviceClient) OTAUpdate(ctx context.Context, reqData *OTAUpdateRequest) (map[string]interface{}, error) {
-	url := "http://" + dc.Host + ":" + strconv.Itoa(dc.Port) + "/api/ota"
-	body, _ := json.Marshal(reqData)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	if dc.APIToken != "" {
-		req.Header.Set("Authorization", "Bearer " + dc.APIToken)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-// SendControlCommand proxies control commands to device.
-func (dc *DeviceClient) SendControlCommand(ctx context.Context, cmd *ControlCommand) (map[string]interface{}, error) {
-	url := "http://" + dc.Host + ":" + strconv.Itoa(dc.Port) + "/api/control"
-	body, _ := json.Marshal(cmd)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	if dc.APIToken != "" {
-		req.Header.Set("Authorization", "Bearer " + dc.APIToken)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return def
 }
 
 func main() {
-	serverHost := os.Getenv("SERVER_HOST")
 	if serverHost == "" {
 		serverHost = "0.0.0.0"
 	}
-	serverPort := os.Getenv("SERVER_PORT")
 	if serverPort == "" {
 		serverPort = "8080"
 	}
 
-	deviceClient := NewDeviceClientFromEnv()
+	http.HandleFunc("/telemetry", getTelemetry)
+	http.HandleFunc("/ota", otaHandler)
+	http.HandleFunc("/control", controlHandler)
+	if videoMJPEGPort != "" {
+		http.HandleFunc("/telemetry/video", mjpegProxyHandler)
+	}
 
-	http.HandleFunc("/telemetry", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		query := r.URL.Query()
-		if query.Get("video") == "true" {
-			// Proxy raw video stream directly, HTTP-muxed from device
-			deviceClient.ProxyVideoStream(w, r)
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-		data, err := deviceClient.FetchTelemetry(ctx)
-		if err != nil {
-			http.Error(w, "Failed to fetch telemetry: "+err.Error(), 502)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(data)
-	})
+	addr := net.JoinHostPort(serverHost, serverPort)
+	log.Printf("Shifu PAIO driver HTTP server listening at %s", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
+}
 
-	http.HandleFunc("/ota", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var otaReq OTAUpdateRequest
-		if err := json.NewDecoder(r.Body).Decode(&otaReq); err != nil {
-			http.Error(w, "Bad Request: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		result, err := deviceClient.OTAUpdate(ctx, &otaReq)
-		if err != nil {
-			http.Error(w, "OTA update failed: "+err.Error(), 500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
-	})
+// getTelemetry handles GET /telemetry. Returns sensor, AI, and (optionally) video data.
+func getTelemetry(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(telemetryTimeout)*time.Second)
+	defer cancel()
 
-	http.HandleFunc("/control", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var cmd ControlCommand
-		if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
-			http.Error(w, "Bad Request: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-		defer cancel()
-		result, err := deviceClient.SendControlCommand(ctx, &cmd)
-		if err != nil {
-			http.Error(w, "Control command failed: "+err.Error(), 500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
-	})
+	telemetry := TelemetryData{
+		Timestamp: time.Now(),
+	}
 
-	log.Printf("Shifu PAIOs HTTP Driver listening on %s:%s", serverHost, serverPort)
-	log.Fatal(http.ListenAndServe(serverHost+":"+serverPort, nil))
+	// Example: Fetch telemetry from the device (mocked)
+	telemetry.SensorData = fetchSensorData(ctx)
+	telemetry.AIResults = fetchAIResults(ctx)
+	telemetry.CustomData = fetchCustomDeviceData(ctx)
+
+	// If MJPEG video configured, provide video endpoint link
+	if videoMJPEGPort != "" {
+		telemetry.VideoStreamMJPEG = getVideoHTTPURL()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(telemetry)
+}
+
+// otaHandler handles POST /ota for OTA firmware/software upgrades.
+func otaHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req OTAUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	// Mock OTA update trigger
+	go performOTAUpdate(req)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"OTA update initiated"}`))
+}
+
+// controlHandler handles POST /control for device commands.
+func controlHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req ControlCommandRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	// Mock device control
+	resp := performDeviceControl(req)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// mjpegProxyHandler proxies MJPEG video stream from device to HTTP for browser consumption.
+// GET /telemetry/video
+func mjpegProxyHandler(w http.ResponseWriter, r *http.Request) {
+	if videoMJPEGPort == "" || deviceIP == "" {
+		http.Error(w, "Video stream not configured", http.StatusNotFound)
+		return
+	}
+	deviceURL := "http://" + net.JoinHostPort(deviceIP, videoMJPEGPort) + "/"
+	proxyReq, err := http.NewRequestWithContext(r.Context(), "GET", deviceURL, nil)
+	if err != nil {
+		http.Error(w, "Failed to prepare video stream", http.StatusInternalServerError)
+		return
+	}
+	client := http.Client{
+		Timeout: 0, // No timeout for streaming
+	}
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		http.Error(w, "Failed to connect to video stream", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+// getVideoHTTPURL returns the HTTP URL for MJPEG stream for browser
+func getVideoHTTPURL() string {
+	host := serverHost
+	if host == "0.0.0.0" || host == "" {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, serverPort) + "/telemetry/video"
+}
+
+// Mocked Telemetry Functions (replace with real device communication as needed)
+func fetchSensorData(ctx context.Context) map[string]interface{} {
+	return map[string]interface{}{
+		"temperature": 25.1,
+		"humidity":    40.0,
+	}
+}
+func fetchAIResults(ctx context.Context) map[string]interface{} {
+	return map[string]interface{}{
+		"object_detection": []map[string]interface{}{
+			{"label": "person", "confidence": 0.99},
+		},
+	}
+}
+func fetchCustomDeviceData(ctx context.Context) map[string]interface{} {
+	return map[string]interface{}{
+		"custom_metric": 123,
+	}
+}
+
+// Mock OTA update procedure
+func performOTAUpdate(req OTAUpdateRequest) {
+	// Simulate OTA update (replace with real implementation)
+	time.Sleep(2 * time.Second)
+	log.Printf("OTA update triggered: %+v", req)
+}
+
+// Mock device control procedure
+func performDeviceControl(req ControlCommandRequest) map[string]interface{} {
+	// Simulate device control (replace with real implementation)
+	log.Printf("Device control command: %+v", req)
+	return map[string]interface{}{
+		"status":  "Command executed",
+		"command": req.Command,
+	}
 }
